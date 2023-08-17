@@ -1,13 +1,13 @@
-use windows_sys::Win32::{
-    Foundation::{GetLastError, SYSTEMTIME},
-    System::SystemInformation::SetSystemTime ,
-};
-
 use std::{
     env,
     io::{Read, Write},
     net::TcpStream, fmt::Display,
 };
+
+#[cfg(target_os="windows")]
+mod windows;
+#[cfg(target_os="windows")]
+use windows::set_system_time;
 
 const HTTP_RESPONSE_DATE_PREFIX: &str = "Date: ";
 
@@ -22,16 +22,30 @@ impl Display for ByteStr<'_> {
     }
 }
 
-fn set_system_time(time: &SYSTEMTIME) -> Result<(), String> {
-    unsafe {
-        match SetSystemTime (time) {
-            0 => Err(format!("Error in SetSystemTime : {}", GetLastError())),
-            _ => Ok(()),
-        }
-    }
+#[derive(Clone, Copy)]
+pub struct Time {
+    year: u16,
+    month: u8,
+    day_of_week: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
 }
 
-fn parse_num(num: &[u8]) -> Result<u16,()> {
+fn parse_u8(num: &[u8]) -> Result<u8,()> {
+    let mut result = 0;
+    for &digit in num {
+        let digit = digit.wrapping_sub(b'0');
+        if digit > 9 {
+            return Err(());
+        }
+        result = result * 10 + (digit as u8);
+    }
+    Ok(result)
+}
+
+fn parse_u16(num: &[u8]) -> Result<u16,()> {
     let mut result = 0;
     for &digit in num {
         let digit = digit.wrapping_sub(b'0');
@@ -43,9 +57,9 @@ fn parse_num(num: &[u8]) -> Result<u16,()> {
     Ok(result)
 }
 
-fn parse_http_response_date(date: &[u8]) -> Result<SYSTEMTIME, String> {
+fn parse_http_response_date(date: &[u8]) -> Result<Time, String> {
     // Sat, 09 Oct 2010 14:28:02 GMT
-    fn error(date: &[u8], step: &str) -> Result<SYSTEMTIME,String> {
+    fn error(date: &[u8], step: &str) -> Result<Time,String> {
         Err(format!("Error parsing date from HTTP response ({}): {}", step, ByteStr(date)))
     }
     let mut parts = date.split(|&c| c == b' ' || c == b':');
@@ -59,7 +73,7 @@ fn parse_http_response_date(date: &[u8]) -> Result<SYSTEMTIME, String> {
         Some(b"Sun,") => 0,
         _ => return error(date, "day_of_week"),
     };
-    let day = match parts.next().map(|d| parse_num(d)) {
+    let day = match parts.next().map(|d| parse_u8(d)) {
         Some(Ok(d)) => d,
         _ => return error(date, "day"),
     };
@@ -78,35 +92,34 @@ fn parse_http_response_date(date: &[u8]) -> Result<SYSTEMTIME, String> {
         Some(b"Dec") => 12,
         _ => return error(date, "month"),
     };
-    let year = match parts.next().map(|d| parse_num(d)) {
+    let year = match parts.next().map(|d| parse_u16(d)) {
         Some(Ok(d)) => d,
         _ => return error(date, "year"),
     };
-    let hour = match parts.next().map(|d| parse_num(d)) {
+    let hour = match parts.next().map(|d| parse_u8(d)) {
         Some(Ok(d)) => d,
         _ => return error(date, "hour"),
     };
-    let minute = match parts.next().map(|d| parse_num(d)) {
+    let minute = match parts.next().map(|d| parse_u8(d)) {
         Some(Ok(d)) => d,
         _ => return error(date, "minute"),
     };
-    let second = match parts.next().map(|d| parse_num(d)) {
+    let second = match parts.next().map(|d| parse_u8(d)) {
         Some(Ok(d)) => d,
         _ => return error(date, "second"),
     };
-    Ok(SYSTEMTIME {
-        wYear: year,
-        wMonth: month,
-        wDayOfWeek: day_of_week,
-        wDay: day,
-        wHour: hour,
-        wMinute: minute,
-        wSecond: second,
-        wMilliseconds: 0,
+    Ok(Time {
+        year,
+        month,
+        day_of_week,
+        day,
+        hour,
+        minute,
+        second,
     })
 }
 
-fn get_http_response_line_date(line: &[u8]) -> Option<Result<SYSTEMTIME, String>> {
+fn get_http_response_line_date(line: &[u8]) -> Option<Result<Time, String>> {
     if line.starts_with(HTTP_RESPONSE_DATE_PREFIX.as_bytes()) {
         Some(parse_http_response_date(&line[HTTP_RESPONSE_DATE_PREFIX.as_bytes().len()..]))
     } else {
@@ -114,7 +127,7 @@ fn get_http_response_line_date(line: &[u8]) -> Option<Result<SYSTEMTIME, String>
     }
 }
 
-fn get_http_response_date(response: &mut Vec<u8>) -> Option<Result<SYSTEMTIME, String>> {
+fn get_http_response_date(response: &mut Vec<u8>) -> Option<Result<Time, String>> {
     let mut line_start = 0;
     for index in 0..response.len() {
         if response[index] == '\n' as u8 {
@@ -129,7 +142,7 @@ fn get_http_response_date(response: &mut Vec<u8>) -> Option<Result<SYSTEMTIME, S
     None
 }
 
-fn get_time_http(url: &str) -> Result<SYSTEMTIME, String> {
+pub fn get_time_http(url: &str) -> Result<Time, String> {
     let mut stream =
         TcpStream::connect(url).map_err(|e| format!("Error connecting to \"{url}\": {e}"))?;
     stream
@@ -151,10 +164,10 @@ fn get_time_http(url: &str) -> Result<SYSTEMTIME, String> {
     }
 }
 
-fn run(timespec: &str) -> Result<(), String> {
+pub fn run(timespec: &str) -> Result<(), String> {
     let time = get_time_http(timespec)?;
-    //println!("{}:{}", time.wHour, time.wMinute);
-    set_system_time(&time)
+    //println!("{}:{}", time.hour, time.minute);
+    set_system_time(time)
 }
 
 fn main() {
